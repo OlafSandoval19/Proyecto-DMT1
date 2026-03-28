@@ -138,7 +138,7 @@ with st.sidebar:
                 st.rerun()
 
 # =========================
-# 1) HELPERS PACIENTES / RUTAS
+# 1) RUTAS Y CONFIG
 # =========================
 try:
     BASE_DIR = Path(__file__).resolve().parents[1]
@@ -154,7 +154,36 @@ LSTM_ROOT = MODELS_ROOT / "LSTM"
 RED_EVENT = "#e53935"
 BLUE_PRED = "#1565c0"
 
+# --- Config general del modo manual ---
+MANUAL_COMPARE_BOTH = True
+MANUAL_SHOW_ONLY_FINAL_LINE = True
 
+# Pesos base del ensamble en modo manual
+BASE_WEIGHT_XGB = 0.78
+BASE_WEIGHT_LSTM = 0.22
+
+# --- Config corrección fisiológica suave ---
+PHYSIO_CHO_GAIN = 0.95
+PHYSIO_INSULIN_GAIN = 6.25
+PHYSIO_CHO_PEAK_MIN = 55
+PHYSIO_INSULIN_PEAK_MIN = 80
+PHYSIO_CHO_WIDTH = 2600.0
+PHYSIO_INSULIN_WIDTH = 3600.0
+
+# Cuánto empuja la corrección final
+PHYSIO_BLEND_ALPHA_XGB = 0.62
+PHYSIO_BLEND_ALPHA_LSTM = 0.42
+
+# Suavizados
+PHYSIO_CORR_ROLLING = 25
+FINAL_ROLLING = 11
+
+# Protección para evitar caídas/subidas absurdas por minuto
+MAX_DELTA_PER_MIN = 4.0
+
+# =========================
+# 2) HELPERS PACIENTES
+# =========================
 def load_patients_master(csv_path: Path) -> pd.DataFrame:
     if not csv_path.exists():
         return pd.DataFrame(columns=["ID", "Nombre"])
@@ -276,9 +305,8 @@ def safe_float(v, default=np.inf):
     except Exception:
         return default
 
-
 # =========================
-# 2) CARGA DE MODELOS
+# 3) CARGA DE MODELOS
 # =========================
 @st.cache_resource(show_spinner=False)
 def load_xgb_artifacts(child_folder_name: str):
@@ -437,9 +465,8 @@ def choose_best_model(child_id: str):
         "selection_reason": f"Selección automática por menor RMSE histórico ({best['score']:.3f})."
     }
 
-
 # =========================
-# 3) TÍTULO
+# 4) TÍTULO
 # =========================
 st.markdown("""
 <h2 class="data-title">
@@ -451,72 +478,28 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # =========================
-# 4) SELECCIÓN DE PACIENTE
+# 5) SELECCIÓN DE PACIENTE
 # =========================
-patients = get_registered_patients(BASE_UPLOADS, PATIENTS_CSV)
+manual_cfg_pre = st.session_state.get("manual_prediction_config", {})
 
-if not patients:
-    st.error("No se encontraron pacientes registrados en 'data/uploads'.")
+if not isinstance(manual_cfg_pre, dict) or not manual_cfg_pre.get("patient_id"):
+    st.warning("No hay un paciente anclado desde Ingestas. Primero configura y guarda un escenario manual.")
     st.stop()
 
+locked_patient_id = str(manual_cfg_pre.get("patient_id", "")).strip()
+
+patients = get_registered_patients(BASE_UPLOADS, PATIENTS_CSV)
 patients_df = pd.DataFrame(patients)
 
-st.markdown('<div class="patient-section">', unsafe_allow_html=True)
-st.markdown("### 👤 Selección de paciente")
+selected_rows = patients_df[
+    patients_df["patient_id"].astype(str).str.strip() == locked_patient_id
+].copy()
 
-f1, f2 = st.columns(2)
-
-with f1:
-    use_patient_id_filter = st.checkbox("Buscar por ID", key="forecast_use_patient_id_filter")
-    patient_id_filter = st.text_input(
-        "Filtrar por ID",
-        placeholder="Ejemplo: CHILD_001",
-        key="forecast_patient_id_filter",
-        disabled=not use_patient_id_filter
-    )
-
-with f2:
-    use_patient_name_filter = st.checkbox("Buscar por Nombre", key="forecast_use_patient_name_filter")
-    patient_name_filter = st.text_input(
-        "Filtrar por Nombre",
-        placeholder="Ejemplo: Niño 1",
-        key="forecast_patient_name_filter",
-        disabled=not use_patient_name_filter
-    )
-
-patients_filtered = patients_df.copy()
-
-if use_patient_id_filter and patient_id_filter.strip():
-    term_id = patient_id_filter.strip().lower()
-    patients_filtered = patients_filtered[
-        patients_filtered["patient_id"].astype(str).str.lower().str.contains(term_id, na=False)
-    ]
-
-if use_patient_name_filter and patient_name_filter.strip():
-    term_name = patient_name_filter.strip().lower()
-    patients_filtered = patients_filtered[
-        patients_filtered["patient_name"].astype(str).str.lower().str.contains(term_name, na=False)
-    ]
-
-patients_filtered = patients_filtered.reset_index(drop=True)
-
-st.caption(f"Pacientes encontrados: {len(patients_filtered)}")
-
-if patients_filtered.empty:
-    st.warning("No se encontraron pacientes con los filtros seleccionados.")
-    st.markdown('</div>', unsafe_allow_html=True)
+if selected_rows.empty:
+    st.error("El paciente anclado desde Ingestas no fue encontrado en el registro.")
     st.stop()
 
-filtered_options = patients_filtered.to_dict(orient="records")
-
-selected_patient = st.selectbox(
-    "Selecciona el paciente para pronóstico",
-    options=filtered_options,
-    format_func=patient_label,
-    key="forecast_selected_patient"
-)
-
-st.markdown('</div>', unsafe_allow_html=True)
+selected_patient = selected_rows.iloc[0].to_dict()
 
 pid = selected_patient["patient_id"]
 nombre = selected_patient["patient_name"]
@@ -535,18 +518,18 @@ st.markdown(
         margin-bottom: 14px;
     ">
         <div style="font-size: 20px; font-weight: 800;">
-            🟢 Paciente activo: {nombre} <span style="font-weight:600; opacity:0.9;">(ID {pid})</span>
+            🟢 Paciente del escenario activo: {nombre}
+            <span style="font-weight:600; opacity:0.9;">(ID {pid})</span>
         </div>
         <div style="margin-top: 6px; font-size: 15px; opacity: 0.85;">
-            Carpeta de modelo esperada: {child_id}
+            Este pronóstico está vinculado automáticamente al paciente configurado en Ingestas manuales.
         </div>
     </div>
     """,
     unsafe_allow_html=True,
 )
-
 # =========================
-# 5) CONFIGURACIÓN MANUAL
+# 6) CONFIGURACIÓN MANUAL
 # =========================
 manual_cfg = st.session_state.get("manual_prediction_config", {})
 events = manual_cfg.get("events", []) if isinstance(manual_cfg, dict) else []
@@ -574,10 +557,15 @@ if not df_events.empty and "datetime" in df_events.columns:
     df_events["datetime"] = pd.to_datetime(df_events["datetime"], errors="coerce")
     df_events = df_events.sort_values("datetime").reset_index(drop=True)
 
+manual_events_mode = not df_events.empty
+
 # =========================
-# 6) SELECCIÓN DE MODELO
+# 7) MODELOS DISPONIBLES
 # =========================
-st.subheader("Modelo de pronóstico")
+# =========================
+# 7) MODELOS DISPONIBLES
+# =========================
+st.subheader("Motor de pronóstico")
 
 c_model_1, c_model_2, c_model_3 = st.columns([1.4, 1, 1])
 
@@ -597,6 +585,7 @@ confidence_pct = 0.0
 confidence_text = "Baja"
 model_status_text = ""
 selection_reason = ""
+selected_model_type_effective = "demo"
 
 if selected_model_type == "automatico":
     auto_info = choose_best_model(child_id)
@@ -617,7 +606,6 @@ elif selected_model_type == "xgboost":
     if xgb_artifacts is not None:
         xgb_model, xgb_feature_cols, xgb_config, xgb_model_dir = xgb_artifacts
         model_available = True
-
         _, metrics_xgb = extract_xgb_score(xgb_config)
         confidence_pct = infer_confidence_from_metrics(metrics_xgb)
         confidence_text = confidence_label(confidence_pct)
@@ -632,21 +620,25 @@ elif selected_model_type == "lstm":
     elif lstm_artifacts is not None:
         lstm_model, lstm_feature_cols, lstm_config, scaler_x, scaler_y, lstm_model_dir = lstm_artifacts
         model_available = True
-
         _, metrics_lstm = extract_lstm_score(lstm_config)
         confidence_pct = infer_confidence_from_metrics(metrics_lstm)
         confidence_text = confidence_label(confidence_pct)
         model_status_text = f"Modelo LSTM cargado desde: {lstm_model_dir}"
     else:
         model_status_text = f"No se encontró el modelo LSTM para {child_id}."
-else:
-    selected_model_type_effective = "demo"
+
+# En modo manual, intentamos cargar ambos si existen
+if xgb_artifacts is not None:
+    xgb_model, xgb_feature_cols, xgb_config, xgb_model_dir = xgb_artifacts
+
+if lstm_artifacts not in [None, "tensorflow_missing"]:
+    lstm_model, lstm_feature_cols, lstm_config, scaler_x, scaler_y, lstm_model_dir = lstm_artifacts
 
 with c_model_2:
-    st.metric("Confianza estimada", f"{confidence_pct:,.1f}%")
+    st.metric("Estado", "Listo" if model_available else "Sin modelo")
 
 with c_model_3:
-    st.metric("Nivel", confidence_text)
+    st.metric("Modo", "Ingesta manual previa" if manual_events_mode else "Base")
 
 if model_available:
     st.success(model_status_text)
@@ -655,8 +647,11 @@ if model_available:
 else:
     st.warning(model_status_text)
 
+# if manual_events_mode:
+    # st.info("Modo manual sensible activo: se reforzará la respuesta a CHO e insulina para obtener una curva final más coherente.")
+
 # =========================
-# 7) RESUMEN SUPERIOR
+# 8) RESUMEN SUPERIOR
 # =========================
 st.subheader("Resumen de configuración")
 
@@ -691,7 +686,7 @@ with m3:
 st.divider()
 
 # =========================
-# 8) EVENTOS USADOS
+# 9) EVENTOS USADOS
 # =========================
 st.subheader("Eventos utilizados para el pronóstico")
 
@@ -700,15 +695,14 @@ if df_events.empty:
 else:
     df_show = df_events.copy()
     if "datetime" in df_show.columns:
-        df_show["datetime"] = pd.to_datetime(df_show["datetime"]).dt.strftime("%Y-%m-%d %H:%M")
-
+        df_show["datetime"] = pd.to_datetime(df_show["datetime"], errors="coerce").dt.strftime("%Y-%m-%d %H:%M")
     cols_to_show = [c for c in ["hora", "cho_valor", "cho_unidad", "bolus_u", "nota", "datetime"] if c in df_show.columns]
     st.dataframe(df_show[cols_to_show], use_container_width=True)
 
 st.divider()
 
 # =========================
-# 9) HELPERS DE SIMULACIÓN
+# 10) HELPERS DE SIMULACIÓN
 # =========================
 def parse_start_datetime(reference_date_str: str, start_time_str: str) -> datetime:
     d = pd.to_datetime(reference_date_str).date()
@@ -719,9 +713,10 @@ def parse_start_datetime(reference_date_str: str, start_time_str: str) -> dateti
 def build_minute_schedules(events_df: pd.DataFrame, start_dt: datetime, horizon_min: int):
     food_schedule = np.zeros(horizon_min, dtype=float)
     insulin_schedule = np.zeros(horizon_min, dtype=float)
+    used_rows = []
 
     if events_df.empty:
-        return food_schedule, insulin_schedule
+        return food_schedule, insulin_schedule, pd.DataFrame()
 
     tmp = events_df.copy()
     if "datetime" in tmp.columns:
@@ -736,8 +731,10 @@ def build_minute_schedules(events_df: pd.DataFrame, start_dt: datetime, horizon_
         if 0 <= delta_min < horizon_min:
             food_schedule[delta_min] += float(row.get("cho_mg", 0.0) or 0.0)
             insulin_schedule[delta_min] += float(row.get("bolus_u", 0.0) or 0.0)
+            used_rows.append(row.to_dict())
 
-    return food_schedule, insulin_schedule
+    used_df = pd.DataFrame(used_rows) if used_rows else pd.DataFrame(columns=tmp.columns)
+    return food_schedule, insulin_schedule, used_df
 
 
 def build_demo_forecast(glucose0: float, events_df: pd.DataFrame, start_dt: datetime, horizon_min: int) -> pd.DataFrame:
@@ -761,25 +758,29 @@ def build_demo_forecast(glucose0: float, events_df: pd.DataFrame, start_dt: date
             if event_idx < 0 or event_idx >= n_steps:
                 continue
 
-            cho_peak = cho_g * 1.8
             for k in range(event_idx, min(n_steps, event_idx + 180)):
                 delay = k - event_idx
-                cho_effect = cho_peak * np.exp(-((delay - 45) ** 2) / 1200.0)
+                cho_effect = (cho_g * 1.6) * np.exp(-((delay - 45) ** 2) / 1800.0)
                 y[k] += cho_effect
 
-            bolus_drop = bolus_u * 8.0
             for k in range(event_idx, min(n_steps, event_idx + 240)):
                 delay = k - event_idx
-                insulin_effect = bolus_drop * np.exp(-((delay - 60) ** 2) / 1800.0)
+                insulin_effect = (bolus_u * 7.0) * np.exp(-((delay - 70) ** 2) / 2600.0)
                 y[k] -= insulin_effect
 
-    y = pd.Series(y).rolling(window=5, min_periods=1, center=True).mean().values
+    y = pd.Series(y).rolling(window=FINAL_ROLLING, min_periods=1, center=True).mean().values
     y = np.clip(y, 40, 400)
 
     return pd.DataFrame({
         "datetime_pred": future_times,
         "glucose_pred": y
     })
+
+
+def build_initial_glucose_history(glucose0, warmup):
+    base = np.full(warmup, float(glucose0), dtype=float)
+    drift = np.linspace(-3.0, 0.0, warmup)
+    return list(np.clip(base + drift, 40, 400))
 
 
 def build_xgb_feature_row(
@@ -797,7 +798,9 @@ def build_xgb_feature_row(
 ):
     row = {}
 
-    hour = (t_abs % 1440) // 60
+    minute_of_day = int(t_abs % 1440)
+    hour = minute_of_day // 60
+
     row["hour"] = hour
     row["hour_sin"] = np.sin(2 * np.pi * hour / 24)
     row["hour_cos"] = np.cos(2 * np.pi * hour / 24)
@@ -826,7 +829,13 @@ def build_xgb_feature_row(
     for w in rolling_insulin:
         row[f"insulin_roll_sum_{w}"] = np.sum(history_insulin[-w:])
 
-    return pd.DataFrame([row])[feature_cols]
+    x = pd.DataFrame([row])
+
+    for col in feature_cols:
+        if col not in x.columns:
+            x[col] = 0.0
+
+    return x[feature_cols]
 
 
 def simulate_xgboost_1440(
@@ -847,14 +856,15 @@ def simulate_xgboost_1440(
 
     warmup = max(max(lags_glucose), max(lags_food), max(lags_insulin), 60)
 
-    history_glucose = [float(glucose0)] * warmup
+    history_glucose = build_initial_glucose_history(glucose0, warmup)
     history_food = [0.0] * warmup
     history_insulin = [0.0] * warmup
 
-    food_schedule, insulin_schedule = build_minute_schedules(events_df, start_dt, horizon_min)
+    food_schedule, insulin_schedule, used_events_df = build_minute_schedules(events_df, start_dt, horizon_min)
 
     preds = []
     future_times = []
+    start_minute_of_day = start_dt.hour * 60 + start_dt.minute
 
     for step in range(horizon_min):
         food_now = float(food_schedule[step])
@@ -867,7 +877,7 @@ def simulate_xgboost_1440(
             history_glucose=history_glucose,
             history_food=history_food,
             history_insulin=history_insulin,
-            t_abs=step,
+            t_abs=start_minute_of_day + step,
             feature_cols=feature_cols,
             lags_glucose=lags_glucose,
             lags_food=lags_food,
@@ -884,12 +894,12 @@ def simulate_xgboost_1440(
         history_glucose.append(pred)
         future_times.append(start_dt + timedelta(minutes=step))
 
-    preds = pd.Series(preds).rolling(window=5, min_periods=1, center=True).mean().values
+    preds = pd.Series(preds).rolling(window=7, min_periods=1, center=True).mean().values
 
     return pd.DataFrame({
         "datetime_pred": future_times,
         "glucose_pred": preds
-    })
+    }), used_events_df
 
 
 def make_lstm_feature_frame(glucose_arr, food_arr, insulin_arr, start_minute_index):
@@ -943,10 +953,11 @@ def simulate_lstm_24h(
     current_glucose_window = np.full(input_window, float(glucose0), dtype=float)
 
     total_future_needed = n_blocks * output_window
-    food_future, insulin_future = build_minute_schedules(events_df, start_dt, total_future_needed)
+    food_future, insulin_future, used_events_df = build_minute_schedules(events_df, start_dt, total_future_needed)
 
     preds_all = []
     prev_block = None
+    start_minute_of_day = start_dt.hour * 60 + start_dt.minute
 
     for b in range(n_blocks):
         block_start = b * output_window
@@ -962,14 +973,16 @@ def simulate_lstm_24h(
             food_input = np.zeros(input_window, dtype=float)
             insulin_input = np.zeros(input_window, dtype=float)
 
-            food_input[-len(food_prev):] = food_prev
-            insulin_input[-len(insulin_prev):] = insulin_prev
+            if len(food_prev) > 0:
+                food_input[-len(food_prev):] = food_prev
+            if len(insulin_prev) > 0:
+                insulin_input[-len(insulin_prev):] = insulin_prev
 
         x_df = make_lstm_feature_frame(
             glucose_arr=current_glucose_window,
             food_arr=food_input,
             insulin_arr=insulin_input,
-            start_minute_index=block_start - input_window
+            start_minute_index=start_minute_of_day + block_start - input_window
         )
 
         x_df = x_df[feature_cols]
@@ -987,7 +1000,7 @@ def simulate_lstm_24h(
         current_glucose_window = pred_block.copy()
 
     pred_full = np.concatenate(preds_all)[:horizon_min]
-    pred_full = pd.Series(pred_full).rolling(window=7, min_periods=1, center=True).mean().values
+    pred_full = pd.Series(pred_full).rolling(window=9, min_periods=1, center=True).mean().values
     pred_full = np.clip(pred_full, 40, 400)
 
     future_times = [start_dt + timedelta(minutes=i) for i in range(horizon_min)]
@@ -995,29 +1008,177 @@ def simulate_lstm_24h(
     return pd.DataFrame({
         "datetime_pred": future_times,
         "glucose_pred": pred_full
-    })
+    }), used_events_df
 
+
+def build_event_correction(
+    events_df: pd.DataFrame,
+    start_dt: datetime,
+    horizon_min: int,
+    cho_gain: float = PHYSIO_CHO_GAIN,
+    insulin_gain: float = PHYSIO_INSULIN_GAIN,
+    cho_peak_min: int = PHYSIO_CHO_PEAK_MIN,
+    insulin_peak_min: int = PHYSIO_INSULIN_PEAK_MIN,
+    cho_width: float = PHYSIO_CHO_WIDTH,
+    insulin_width: float = PHYSIO_INSULIN_WIDTH
+):
+    corr = np.zeros(horizon_min, dtype=float)
+
+    if events_df is None or events_df.empty:
+        return corr
+
+    tmp = events_df.copy()
+    tmp["datetime"] = pd.to_datetime(tmp["datetime"], errors="coerce")
+    tmp = tmp.dropna(subset=["datetime"])
+
+    for _, row in tmp.iterrows():
+        cho_g = float(row.get("cho_mg", 0.0) or 0.0) / 1000.0
+        bolus_u = float(row.get("bolus_u", 0.0) or 0.0)
+
+        event_idx = int(round((row["datetime"] - start_dt).total_seconds() / 60.0))
+        if event_idx < 0 or event_idx >= horizon_min:
+            continue
+
+        for k in range(event_idx, horizon_min):
+            d = k - event_idx
+
+            if cho_g > 0:
+                cho_effect = (cho_g * cho_gain) * np.exp(-((d - cho_peak_min) ** 2) / cho_width)
+                corr[k] += cho_effect
+
+            if bolus_u > 0:
+                insulin_effect = (bolus_u * insulin_gain) * np.exp(-((d - insulin_peak_min) ** 2) / insulin_width)
+                corr[k] -= insulin_effect
+
+    return corr
+
+
+def smooth_series(values, window=FINAL_ROLLING):
+    return pd.Series(values).rolling(window=window, min_periods=1, center=True).mean().values
+
+
+def limit_slope(values, max_delta_per_min=MAX_DELTA_PER_MIN):
+    arr = np.array(values, dtype=float).copy()
+    for i in range(1, len(arr)):
+        delta = arr[i] - arr[i - 1]
+        if delta > max_delta_per_min:
+            arr[i] = arr[i - 1] + max_delta_per_min
+        elif delta < -max_delta_per_min:
+            arr[i] = arr[i - 1] - max_delta_per_min
+    return arr
+
+
+def apply_physiological_correction(
+    forecast_df,
+    used_events_df,
+    start_dt,
+    horizon_min,
+    alpha=0.60
+):
+    out = forecast_df.copy()
+    base = out["glucose_pred"].astype(float).values
+
+    if used_events_df is None or used_events_df.empty:
+        out["glucose_pred_base"] = base
+        out["physio_correction"] = 0.0
+        out["glucose_pred"] = np.clip(smooth_series(base, FINAL_ROLLING), 40, 400)
+        return out
+
+    corr = build_event_correction(
+        events_df=used_events_df,
+        start_dt=start_dt,
+        horizon_min=horizon_min
+    )
+
+    corr_smooth = smooth_series(corr, PHYSIO_CORR_ROLLING)
+    y = base + alpha * corr_smooth
+    y = limit_slope(y, MAX_DELTA_PER_MIN)
+    y = smooth_series(y, FINAL_ROLLING)
+    y = np.clip(y, 40, 400)
+
+    out["glucose_pred_base"] = base
+    out["physio_correction"] = corr_smooth
+    out["glucose_pred"] = y
+    return out
+
+
+def combine_manual_forecasts(
+    forecast_xgb,
+    forecast_lstm,
+    confidence_xgb=80.0,
+    confidence_lstm=70.0
+):
+    out = forecast_xgb[["datetime_pred"]].copy()
+    out["glucose_pred_xgb"] = forecast_xgb["glucose_pred"].values
+    out["glucose_pred_lstm"] = forecast_lstm["glucose_pred"].values
+
+    cx = max(1.0, float(confidence_xgb))
+    cl = max(1.0, float(confidence_lstm))
+
+    wx = BASE_WEIGHT_XGB * (cx / (cx + cl))
+    wl = BASE_WEIGHT_LSTM * (cl / (cx + cl))
+
+    total = wx + wl
+    wx = wx / total
+    wl = wl / total
+
+    y = wx * out["glucose_pred_xgb"].values + wl * out["glucose_pred_lstm"].values
+    y = limit_slope(y, MAX_DELTA_PER_MIN)
+    y = smooth_series(y, FINAL_ROLLING)
+    y = np.clip(y, 40, 400)
+
+    out["glucose_pred"] = y
+    out["blend_weight_xgb"] = wx
+    out["blend_weight_lstm"] = wl
+    out["glucose_pred_base"] = y
+    out["physio_correction"] = 0.0
+    return out
+
+
+def check_manual_sensitivity(total_cho_g, total_bolus_u, forecast_df):
+    if forecast_df is None or forecast_df.empty:
+        return None
+
+    y0 = float(forecast_df["glucose_pred"].iloc[0])
+    ymin = float(forecast_df["glucose_pred"].min())
+    ymax = float(forecast_df["glucose_pred"].max())
+
+    if total_cho_g <= 0.01 and total_bolus_u >= 10 and ymin >= (y0 - 4):
+        return "Escenario con solo insulina y respuesta todavía débil a la baja."
+    if total_bolus_u <= 0.01 and total_cho_g >= 20 and ymax <= (y0 + 4):
+        return "Escenario con solo CHO y respuesta todavía débil al alza."
+
+    return None
 
 # =========================
-# 10) PREDICCIÓN
+# 11) GENERACIÓN DEL PRONÓSTICO
 # =========================
 st.subheader("Generación del pronóstico")
 
 start_dt = parse_start_datetime(reference_date, start_time_str)
+used_events_df = pd.DataFrame()
+
+confidence_xgb = 0.0
+confidence_lstm = 0.0
+if xgb_artifacts is not None:
+    _, metrics_xgb = extract_xgb_score(xgb_config)
+    confidence_xgb = infer_confidence_from_metrics(metrics_xgb)
+
+if lstm_artifacts not in [None, "tensorflow_missing"]:
+    _, metrics_lstm = extract_lstm_score(lstm_config)
+    confidence_lstm = infer_confidence_from_metrics(metrics_lstm)
 
 with st.spinner("Generando pronóstico..."):
-    if not model_available:
-        forecast_df = build_demo_forecast(
-            glucose0=current_glucose,
-            events_df=df_events,
-            start_dt=start_dt,
-            horizon_min=horizon_minutes
-        )
-        model_used_name = "Demo / Sin modelo disponible"
-        model_used_type = "demo"
+    run_manual_ensemble = (
+        manual_events_mode
+        and MANUAL_COMPARE_BOTH
+        and selected_model_type == "automatico"
+        and xgb_artifacts is not None
+        and lstm_artifacts not in [None, "tensorflow_missing"]
+    )
 
-    elif selected_model_type_effective == "xgboost":
-        forecast_df = simulate_xgboost_1440(
+    if run_manual_ensemble:
+        forecast_xgb_raw, used_events_xgb = simulate_xgboost_1440(
             model=xgb_model,
             feature_cols=xgb_feature_cols,
             config=xgb_config,
@@ -1026,11 +1187,8 @@ with st.spinner("Generando pronóstico..."):
             events_df=df_events,
             horizon_min=horizon_minutes
         )
-        model_used_name = f"XGBoost - {child_id}"
-        model_used_type = "xgboost"
 
-    elif selected_model_type_effective == "lstm":
-        forecast_df = simulate_lstm_24h(
+        forecast_lstm_raw, used_events_lstm = simulate_lstm_24h(
             model=lstm_model,
             feature_cols=lstm_feature_cols,
             config=lstm_config,
@@ -1041,8 +1199,89 @@ with st.spinner("Generando pronóstico..."):
             events_df=df_events,
             horizon_min=horizon_minutes
         )
+
+        used_events_df = used_events_xgb.copy() if not used_events_xgb.empty else used_events_lstm.copy()
+
+        forecast_xgb = apply_physiological_correction(
+            forecast_df=forecast_xgb_raw,
+            used_events_df=used_events_df,
+            start_dt=start_dt,
+            horizon_min=horizon_minutes,
+            alpha=PHYSIO_BLEND_ALPHA_XGB
+        )
+
+        forecast_lstm = apply_physiological_correction(
+            forecast_df=forecast_lstm_raw,
+            used_events_df=used_events_df,
+            start_dt=start_dt,
+            horizon_min=horizon_minutes,
+            alpha=PHYSIO_BLEND_ALPHA_LSTM
+        )
+
+        forecast_df = combine_manual_forecasts(
+            forecast_xgb=forecast_xgb,
+            forecast_lstm=forecast_lstm,
+            confidence_xgb=confidence_xgb,
+            confidence_lstm=confidence_lstm
+        )
+
+        model_used_name = f"Pronóstico glucémico - {child_id}"
+        model_used_type = "manual_ensemble"
+        model_available = True
+        confidence_pct = max(confidence_xgb, confidence_lstm, confidence_pct)
+        confidence_text = confidence_label(confidence_pct)
+
+    elif xgb_artifacts is not None and (manual_events_mode or selected_model_type_effective == "xgboost"):
+        forecast_raw, used_events_df = simulate_xgboost_1440(
+            model=xgb_model,
+            feature_cols=xgb_feature_cols,
+            config=xgb_config,
+            glucose0=current_glucose,
+            start_dt=start_dt,
+            events_df=df_events,
+            horizon_min=horizon_minutes
+        )
+
+        forecast_df = apply_physiological_correction(
+            forecast_df=forecast_raw,
+            used_events_df=used_events_df,
+            start_dt=start_dt,
+            horizon_min=horizon_minutes,
+            alpha=PHYSIO_BLEND_ALPHA_XGB if manual_events_mode else 0.0
+        )
+
+        model_used_name = f"XGBoost - {child_id}"
+        model_used_type = "xgboost"
+        model_available = True
+        confidence_pct = confidence_xgb if confidence_xgb > 0 else confidence_pct
+        confidence_text = confidence_label(confidence_pct)
+
+    elif lstm_artifacts not in [None, "tensorflow_missing"] and selected_model_type_effective == "lstm":
+        forecast_raw, used_events_df = simulate_lstm_24h(
+            model=lstm_model,
+            feature_cols=lstm_feature_cols,
+            config=lstm_config,
+            scaler_x=scaler_x,
+            scaler_y=scaler_y,
+            glucose0=current_glucose,
+            start_dt=start_dt,
+            events_df=df_events,
+            horizon_min=horizon_minutes
+        )
+
+        forecast_df = apply_physiological_correction(
+            forecast_df=forecast_raw,
+            used_events_df=used_events_df,
+            start_dt=start_dt,
+            horizon_min=horizon_minutes,
+            alpha=PHYSIO_BLEND_ALPHA_LSTM if manual_events_mode else 0.0
+        )
+
         model_used_name = f"LSTM - {child_id}"
         model_used_type = "lstm"
+        model_available = True
+        confidence_pct = confidence_lstm if confidence_lstm > 0 else confidence_pct
+        confidence_text = confidence_label(confidence_pct)
 
     else:
         forecast_df = build_demo_forecast(
@@ -1051,11 +1290,26 @@ with st.spinner("Generando pronóstico..."):
             start_dt=start_dt,
             horizon_min=horizon_minutes
         )
-        model_used_name = "Demo"
+        used_events_df = df_events.copy()
+        model_used_name = "Demo / Sin modelo disponible"
         model_used_type = "demo"
 
+if df_events.empty:
+    used_events_df = pd.DataFrame()
+elif used_events_df is None:
+    used_events_df = pd.DataFrame()
+
+if not df_events.empty and used_events_df.empty:
+    st.warning("Los eventos capturados no cayeron dentro del horizonte del pronóstico y no fueron utilizados.")
+
+sensitivity_warning = check_manual_sensitivity(total_cho_g, total_bolus_u, forecast_df)
+if sensitivity_warning:
+    st.warning(f"⚠️ {sensitivity_warning}")
+
+confidence_text = confidence_label(confidence_pct)
+
 # =========================
-# 11) MÉTRICAS DE RESULTADO
+# 12) MÉTRICAS DE RESULTADO
 # =========================
 pred_min = float(forecast_df["glucose_pred"].min())
 pred_max = float(forecast_df["glucose_pred"].max())
@@ -1074,32 +1328,28 @@ with k4:
 with k5:
     st.metric("Confianza estimada", f"{confidence_pct:,.1f}%")
 
-msg = "Pronóstico en rango esperado."
-if pred_min < 70:
-    msg = "Posible riesgo de hipoglucemia en el horizonte pronosticado."
-elif pred_max > 180:
-    msg = "Posible riesgo de hiperglucemia en el horizonte pronosticado."
+risk_msgs = []
 
-st.markdown(
-    f"""
-    <div style="
-        padding: 12px 16px;
-        border-radius: 12px;
-        background: rgba(52, 152, 219, 0.08);
-        border: 1px solid rgba(52, 152, 219, 0.25);
-        margin-bottom: 14px;
-    ">
-        <b>Modelo utilizado:</b> {model_used_name}<br>
-        <b>Tipo:</b> {model_used_type}<br>
-        <b>Interpretación rápida:</b> {msg}<br>
-        <b>Confianza estimada del pronóstico:</b> {confidence_pct:,.1f}% ({confidence_text})
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
+if pred_min < 70:
+    risk_msgs.append("posible riesgo de hipoglucemia")
+
+if pred_max > 180:
+    risk_msgs.append("posible riesgo de hiperglucemia")
+
+if risk_msgs:
+    msg = " y ".join(risk_msgs).capitalize() + " en el horizonte pronosticado."
+    recommendation = "Se recomienda ajustar la dosis de insulina y revisar la distribución de carbohidratos del escenario."
+else:
+    msg = "Pronóstico en rango esperado."
+    recommendation = "El escenario mantiene una dinámica glucémica dentro del rango objetivo estimado."
+
+st.markdown("#### Pronóstico glucémico personalizado")
+st.error(f"**Interpretación clínica:** **{msg}**")
+st.warning(f"**Recomendación:** **{recommendation}**")
+st.markdown(f"**Confianza estimada del pronóstico:** **{confidence_pct:,.1f}% ({confidence_text})**")
 
 # =========================
-# 12) GRÁFICA PRINCIPAL
+# 13) GRÁFICA PRINCIPAL
 # =========================
 fig = go.Figure()
 
@@ -1114,11 +1364,11 @@ fig.add_trace(go.Scatter(
     y=forecast_df["glucose_pred"],
     mode="lines",
     name="Pronóstico de glucosa",
-    line=dict(color=BLUE_PRED, width=2.5)
+    line=dict(color=BLUE_PRED, width=2.8)
 ))
 
-if not df_events.empty and "datetime" in df_events.columns:
-    events_plot = df_events.copy()
+events_plot = used_events_df.copy() if used_events_df is not None else pd.DataFrame()
+if not events_plot.empty and "datetime" in events_plot.columns:
     events_plot["datetime"] = pd.to_datetime(events_plot["datetime"], errors="coerce")
     events_plot = events_plot.dropna(subset=["datetime"])
 
@@ -1130,7 +1380,7 @@ if not df_events.empty and "datetime" in df_events.columns:
             cho_g = float(r.get("cho_mg", 0.0) or 0.0) / 1000.0
             bolus_u = float(r.get("bolus_u", 0.0) or 0.0)
             hover_texts.append(f"CHO: {cho_g:.1f} g<br>Bolo: {bolus_u:.1f} U")
-            marker_sizes.append(9 if cho_g > 0 else 7)
+            marker_sizes.append(8 if cho_g > 0 else 7)
 
         fig.add_trace(go.Scatter(
             x=events_plot["datetime"],
@@ -1147,7 +1397,7 @@ if not df_events.empty and "datetime" in df_events.columns:
         ))
 
 fig.update_layout(
-    title=f"Pronóstico de glucosa | Modelo: {model_used_name}",
+    title=f"Pronóstico de glucosa | {nombre}",
     xaxis_title="Tiempo",
     yaxis_title="Glucosa estimada (mg/dL)",
     height=520,
@@ -1158,21 +1408,23 @@ fig.update_layout(
 st.plotly_chart(fig, use_container_width=True)
 
 # =========================
-# 13) TABLA Y EXPORTACIÓN CSV
+# 14) RESULTADOS EXPORTABLES
 # =========================
 st.subheader("Resultados exportables")
 
-forecast_export = forecast_df.copy()
-forecast_export["patient_id"] = pid
-forecast_export["patient_name"] = patient_name_cfg
-forecast_export["model_used"] = model_used_name
-forecast_export["model_type"] = model_used_type
-forecast_export["confidence_pct"] = round(confidence_pct, 2)
+forecast_export = pd.DataFrame({
+    "datetime": pd.to_datetime(forecast_df["datetime_pred"]).dt.strftime("%Y-%m-%d %H:%M"),
+    "prediccion_glucosa_mgdl": forecast_df["glucose_pred"].round(3),
+    "modelo_usado": (
+        "XGBoost" if selected_model_type == "xgboost"
+        else "LSTM" if selected_model_type == "lstm"
+        else f"El Mejor ({'XGBoost' if selected_model_type_effective == 'xgboost' else 'LSTM'})"
+    ),
+    "patient_id": pid
+})
 
 with st.expander("Ver tabla del pronóstico"):
-    df_show_export = forecast_export.copy()
-    df_show_export["datetime_pred"] = pd.to_datetime(df_show_export["datetime_pred"]).dt.strftime("%Y-%m-%d %H:%M")
-    st.dataframe(df_show_export, use_container_width=True)
+    st.dataframe(forecast_export, use_container_width=True)
 
 csv_buffer = io.StringIO()
 forecast_export.to_csv(csv_buffer, index=False)
@@ -1187,19 +1439,11 @@ st.download_button(
 )
 
 # =========================
-# 14) BOTONES FINALES
+# 15) BOTÓN FINAL
 # =========================
 st.markdown("---")
-b1, b2, b3 = st.columns(3)
+b1 = st.columns(1)
 
-with b1:
-    if st.button("⬅ Volver a Ingestas", use_container_width=True):
-        st.switch_page("pages/3_Ingestas.py")
-
-with b2:
+with b1[0]:
     if st.button("🔄 Recalcular pronóstico", use_container_width=True):
         st.rerun()
-
-with b3:
-    if st.button("📂 Volver a carga de datos", use_container_width=True):
-        st.switch_page("pages/2_Carga_de_datos.py")

@@ -20,6 +20,15 @@ if not st.session_state.get("authenticated", False):
 render_kidia_header()
 
 # =========================
+# CONSTANTES
+# =========================
+MAX_EVENTOS = 5
+BASE_UPLOADS = Path("data/uploads")
+PATIENTS_CSV = Path("data/patients.csv")
+MANUAL_DATA_DIR = Path("data/manual_prediction")
+MANUAL_DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+# =========================
 # CSS / ESTILOS
 # =========================
 st.markdown("""
@@ -109,120 +118,59 @@ st.markdown("""
 # =========================
 with st.sidebar:
     st.markdown('<div class="sidebar-bottom-space"></div>', unsafe_allow_html=True)
-
-    if "confirm_logout" not in st.session_state:
-        st.session_state.confirm_logout = False
-
-    if not st.session_state.confirm_logout:
-        if st.button("Cerrar sesión", use_container_width=True):
-            st.session_state.confirm_logout = True
-            st.rerun()
-    else:
-        st.warning("¿Seguro que deseas cerrar sesión?")
-
-        c1, c2 = st.columns(2)
-        with c1:
-            if st.button("Sí, salir", use_container_width=True):
-                st.session_state.confirm_logout = False
-                logout()
-                st.switch_page("app.py")
-
-        with c2:
-            if st.button("Cancelar", use_container_width=True):
-                st.session_state.confirm_logout = False
-                st.rerun()
+    if st.button("Cerrar sesión", use_container_width=True):
+        logout()
+        st.rerun()
 
 # =========================
-# HELPERS DE RUTA
+# HELPERS
 # =========================
-try:
-    BASE_DIR = Path(__file__).resolve().parents[1]
-except Exception:
-    BASE_DIR = Path.cwd()
+def patient_label(p: dict) -> str:
+    return f'{p.get("patient_name", "Sin nombre")} ({p.get("patient_id", "Sin ID")})'
 
-BASE_UPLOADS = BASE_DIR / "data" / "uploads"
-PATIENTS_CSV = BASE_DIR / "data" / "patients.csv"
-MANUAL_EVENTS_ROOT = BASE_DIR / "data" / "manual_events"
-MANUAL_EVENTS_ROOT.mkdir(parents=True, exist_ok=True)
+def get_registered_patients(base_uploads: Path, patients_csv: Path):
+    rows = []
 
-# =========================
-# HELPERS DE PACIENTES
-# =========================
-def load_patients_master(csv_path: Path) -> pd.DataFrame:
-    if not csv_path.exists():
-        return pd.DataFrame(columns=["ID", "Nombre"])
-
-    for enc in ["utf-8", "latin-1", "cp1252"]:
+    if patients_csv.exists():
         try:
-            df = pd.read_csv(csv_path, encoding=enc)
-            df.columns = [c.strip() for c in df.columns]
+            df = pd.read_csv(patients_csv)
+            if not df.empty:
+                for _, r in df.iterrows():
+                    pid = str(r.get("ID", r.get("patient_id", ""))).strip()
+                    pname = str(r.get("Nombre", r.get("patient_name", ""))).strip()
 
-            if "ID" not in df.columns:
-                df["ID"] = ""
-            if "Nombre" not in df.columns:
-                df["Nombre"] = ""
-
-            df["ID"] = df["ID"].astype(str).str.strip()
-            df["Nombre"] = df["Nombre"].astype(str).str.strip()
-            df = df[df["ID"] != ""].copy()
-            return df
+                    if pid:
+                        folder_path = base_uploads / f"patient_{pid}"
+                        rows.append({
+                            "patient_id": pid,
+                            "patient_name": pname if pname else pid,
+                            "folder_path": str(folder_path)
+                        })
         except Exception:
-            continue
+            pass
 
-    return pd.DataFrame(columns=["ID", "Nombre"])
-
-
-def get_registered_patients(base_path: Path, patients_csv_path: Path):
-    patients = []
-    df_master = load_patients_master(patients_csv_path)
-
-    name_map = {}
-    if not df_master.empty:
-        name_map = dict(zip(df_master["ID"], df_master["Nombre"]))
-
-    if not base_path.exists():
-        return patients
-
-    for folder in sorted(base_path.iterdir()):
-        if folder.is_dir():
-            folder_name = folder.name
-
-            if folder_name.startswith("patient_"):
-                patient_id = folder_name.replace("patient_", "").strip()
-            else:
-                patient_id = folder_name.strip()
-
-            patient_name = name_map.get(patient_id, patient_id)
-
-            patients.append({
-                "folder_name": folder_name,
-                "patient_id": patient_id,
-                "patient_name": patient_name,
-                "folder_path": str(folder),
+    # respaldo por si el CSV no existe o viene vacío
+    if not rows and base_uploads.exists():
+        for p in sorted(base_uploads.glob("patient_*")):
+            pid = p.name.replace("patient_", "")
+            rows.append({
+                "patient_id": pid,
+                "patient_name": pid,
+                "folder_path": str(p)
             })
 
-    return patients
+    return rows
 
-
-def patient_label(p):
-    return f"{p['patient_name']} ({p['patient_id']})"
-
-# =========================
-# HELPERS DE EVENTOS
-# =========================
 def get_manual_patient_dir(patient_id: str) -> Path:
-    pdir = MANUAL_EVENTS_ROOT / f"patient_{patient_id}"
+    pdir = MANUAL_DATA_DIR / str(patient_id)
     pdir.mkdir(parents=True, exist_ok=True)
     return pdir
-
 
 def get_events_csv_path(patient_id: str) -> Path:
     return get_manual_patient_dir(patient_id) / "eventos_manuales.csv"
 
-
 def get_config_json_path(patient_id: str) -> Path:
     return get_manual_patient_dir(patient_id) / "config_pronostico.json"
-
 
 def load_saved_events(patient_id: str):
     csv_path = get_events_csv_path(patient_id)
@@ -247,7 +195,6 @@ def load_saved_events(patient_id: str):
     except Exception:
         return []
 
-
 def save_events_csv(patient_id: str, events: list):
     csv_path = get_events_csv_path(patient_id)
 
@@ -270,19 +217,194 @@ def save_events_csv(patient_id: str, events: list):
     df.to_csv(csv_path, index=False, encoding="utf-8-sig")
     return csv_path
 
-
 def save_prediction_config_json(patient_id: str, config: dict):
     json_path = get_config_json_path(patient_id)
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(config, f, ensure_ascii=False, indent=2)
     return json_path
 
+def _safe_time_from_any(value) -> time:
+    if isinstance(value, time):
+        return value
+
+    if value is None:
+        return time(0, 0)
+
+    txt = str(value).strip()
+    for fmt in ("%H:%M", "%H:%M:%S"):
+        try:
+            return datetime.strptime(txt, fmt).time()
+        except Exception:
+            pass
+
+    dt = pd.to_datetime(txt, errors="coerce")
+    if pd.notna(dt):
+        return dt.time()
+
+    return time(0, 0)
+
+def normalize_entries_to_reference_date(entries: list, pred_date):
+    """
+    Reasigna TODOS los eventos a la fecha de referencia actual,
+    conservando la hora capturada.
+    """
+    normalized = []
+
+    if not entries:
+        return normalized
+
+    for ev in entries:
+        ev2 = dict(ev)
+
+        hora_obj = _safe_time_from_any(ev2.get("hora", "00:00"))
+        event_dt = datetime.combine(pred_date, hora_obj)
+
+        cho_unidad = str(ev2.get("cho_unidad", "g")).strip().lower()
+        cho_valor = float(ev2.get("cho_valor", 0.0) or 0.0)
+
+        if "cho_mg" in ev2 and ev2.get("cho_mg") not in ["", None]:
+            try:
+                cho_mg = float(ev2.get("cho_mg", 0.0) or 0.0)
+            except Exception:
+                cho_mg = cho_valor * 1000.0 if cho_unidad == "g" else cho_valor
+        else:
+            cho_mg = cho_valor * 1000.0 if cho_unidad == "g" else cho_valor
+
+        ev2["tipo"] = ev2.get("tipo", "Evento prandial")
+        ev2["fecha"] = pred_date.strftime("%Y-%m-%d")
+        ev2["hora"] = hora_obj.strftime("%H:%M")
+        ev2["datetime"] = event_dt.strftime("%Y-%m-%d %H:%M:%S")
+        ev2["cho_valor"] = float(cho_valor)
+        ev2["cho_unidad"] = "g" if cho_unidad not in ["g", "mg"] else cho_unidad
+        ev2["cho_mg"] = float(cho_mg) if cho_mg > 0 else 0.0
+        ev2["bolus_u"] = float(ev2.get("bolus_u", 0.0) or 0.0)
+        ev2["nota"] = str(ev2.get("nota", "") or "").strip()
+
+        normalized.append(ev2)
+
+    normalized.sort(key=lambda x: x.get("datetime", ""))
+    return normalized
+
+def build_editable_events_df(entries: list, pred_date, start_time_value, active_rows=1):
+    rows = []
+    entries = normalize_entries_to_reference_date(entries, pred_date)
+
+    active_rows = max(1, min(int(active_rows), MAX_EVENTOS))
+
+    for ev in entries[:active_rows]:
+        rows.append({
+            "hora": str(ev.get("hora", "08:00"))[:5],
+            "cho_valor": float(ev.get("cho_valor", 0.0) or 0.0),
+            "cho_unidad": str(ev.get("cho_unidad", "g") or "g"),
+            "bolus_u": float(ev.get("bolus_u", 0.0) or 0.0),
+            "nota": str(ev.get("nota", "") or ""),
+        })
+
+    while len(rows) < active_rows:
+        rows.append({
+            "hora": "08:00",
+            "cho_valor": 0.0,
+            "cho_unidad": "g",
+            "bolus_u": 0.0,
+            "nota": "",
+        })
+
+    return pd.DataFrame(rows)
+
+
+def validate_and_convert_events_df(df_edit: pd.DataFrame, pred_date, start_time_value):
+    errors = []
+    cleaned_entries = []
+
+    if df_edit is None or df_edit.empty:
+        return cleaned_entries, errors
+
+    horas_vistas = set()
+
+    for idx, row in df_edit.iterrows():
+        hora_raw = str(row.get("hora", "") or "").strip()
+        cho_valor = row.get("cho_valor", 0.0)
+        cho_unidad = str(row.get("cho_unidad", "g") or "g").strip().lower()
+        bolus_u = row.get("bolus_u", 0.0)
+        nota = str(row.get("nota", "") or "").strip()
+
+        try:
+            cho_valor = float(cho_valor or 0.0)
+        except Exception:
+            cho_valor = 0.0
+
+        try:
+            bolus_u = float(bolus_u or 0.0)
+        except Exception:
+            bolus_u = 0.0
+
+        fila_vacia = (hora_raw == "") and (cho_valor <= 0) and (bolus_u <= 0) and (nota == "")
+        if fila_vacia:
+            continue
+
+        if hora_raw == "":
+            errors.append(f"Fila {idx + 1}: debes indicar una hora.")
+            continue
+
+        hora_obj = _safe_time_from_any(hora_raw)
+        hora_fmt = hora_obj.strftime("%H:%M")
+
+        if hora_fmt in horas_vistas:
+            errors.append(f"Fila {idx + 1}: la hora {hora_fmt} está duplicada. No se permiten eventos prandiales solapados.")
+            continue
+
+        horas_vistas.add(hora_fmt)
+
+        if cho_unidad not in ["g", "mg"]:
+            cho_unidad = "g"
+
+        if cho_valor < 0:
+            errors.append(f"Fila {idx + 1}: los carbohidratos no pueden ser negativos.")
+            continue
+
+        if bolus_u < 0:
+            errors.append(f"Fila {idx + 1}: la insulina no puede ser negativa.")
+            continue
+
+        if cho_valor == 0 and bolus_u == 0:
+            errors.append(f"Fila {idx + 1}: agrega carbohidratos o bolo, de lo contrario deja la fila vacía.")
+            continue
+
+        event_dt = datetime.combine(pred_date, hora_obj)
+        cho_mg = cho_valor * 1000.0 if cho_unidad == "g" else cho_valor
+
+        cleaned_entries.append({
+            "tipo": "Evento prandial",
+            "fecha": pred_date.strftime("%Y-%m-%d"),
+            "hora": hora_fmt,
+            "datetime": event_dt.strftime("%Y-%m-%d %H:%M:%S"),
+            "cho_valor": float(cho_valor),
+            "cho_unidad": cho_unidad,
+            "cho_mg": float(cho_mg) if cho_valor > 0 else 0.0,
+            "bolus_u": float(bolus_u),
+            "nota": nota,
+        })
+
+    cleaned_entries.sort(key=lambda x: x["datetime"])
+
+    if len(cleaned_entries) > MAX_EVENTOS:
+        errors.append(f"Solo se permiten hasta {MAX_EVENTOS} eventos por día.")
+
+    return cleaned_entries[:MAX_EVENTOS], errors
+
 
 def save_all_manual_data(patient_id: str, patient_name: str, patient_folder: str,
                          pred_date, start_time_value, glucose_now, entries: list):
-    csv_path = save_events_csv(patient_id, entries)
+    # CORRECCIÓN CLAVE:
+    # los eventos se re-fechan SIEMPRE a la fecha de referencia actual
+    entries_normalized = normalize_entries_to_reference_date(entries, pred_date)
 
-    df_entries = pd.DataFrame(entries) if entries else pd.DataFrame()
+    # actualizamos el state también
+    st.session_state.manual_entries_by_patient[str(patient_id)] = entries_normalized
+
+    csv_path = save_events_csv(patient_id, entries_normalized)
+
+    df_entries = pd.DataFrame(entries_normalized) if entries_normalized else pd.DataFrame()
     config_payload = {
         "patient_id": patient_id,
         "patient_name": patient_name,
@@ -297,6 +419,8 @@ def save_all_manual_data(patient_id: str, patient_name: str, patient_folder: str
 
     json_path = save_prediction_config_json(patient_id, config_payload)
     st.session_state.manual_prediction_config = config_payload
+    st.session_state.forecast_locked_patient_id = str(patient_id)
+    st.session_state.forecast_locked_patient_name = str(patient_name)
     return csv_path, json_path, config_payload
 
 def sync_manual_data_after_edit(patient_id: str, patient_name: str, patient_folder: str,
@@ -312,6 +436,57 @@ def sync_manual_data_after_edit(patient_id: str, patient_name: str, patient_fold
     )
     st.session_state.manual_prediction_config = config_payload
     return csv_path, json_path
+
+def render_confidence_message(n_eventos: int, max_eventos: int = 6):
+    if n_eventos <= 0:
+        st.info("ℹ️ Aún no hay eventos capturados. Agrega eventos para construir un escenario de pronóstico.")
+    elif n_eventos == max_eventos:
+        st.success(
+            "✅ Se alcanzó el máximo recomendado de 5 eventos. "
+            "Este escenario es el más consistente con la dinámica usada en el entrenamiento."
+        )
+    elif n_eventos == 5:
+        st.info(
+            "ℹ️ Hay 5 eventos capturados. La confiabilidad sigue siendo buena, "
+            "aunque ligeramente menor respecto a un escenario de 5 eventos."
+        )
+    elif n_eventos == 4:
+        st.warning(
+            "⚠️ Hay 4 eventos capturados. La confiabilidad del pronóstico puede disminuir "
+            "porque el escenario empieza a alejarse del patrón de entrenamiento."
+        )
+    elif n_eventos == 3:
+        st.warning(
+            "⚠️ Hay 3 eventos capturados. La confiabilidad del pronóstico disminuye de forma moderada, "
+            "ya que el modelo fue entrenado con una dinámica de hasta 5 eventos."
+        )
+    elif n_eventos == 2:
+        st.error(
+            "🚨 Solo hay 2 eventos capturados. La confiabilidad del pronóstico puede ser baja "
+            "por alejarse notablemente del escenario de entrenamiento."
+        )
+    elif n_eventos == 1:
+        st.error(
+            "🚨 Solo hay 1 evento capturado. La confiabilidad del pronóstico es baja "
+            "y la simulación puede no representar adecuadamente la dinámica diaria."
+        )
+    else:
+        st.error(
+            f"🚨 Hay {n_eventos} eventos capturados. Este escenario está fuera del rango esperado "
+            "y la confiabilidad puede verse comprometida."
+        )
+
+def generate_time_options(step_minutes=15):
+    options = []
+    for h in range(24):
+        for m in range(0, 60, step_minutes):
+            options.append(f"{h:02d}:{m:02d}")
+    return options
+
+TIME_OPTIONS = generate_time_options(15)
+
+
+
 
 # =========================
 # STATE LOCAL
@@ -523,7 +698,13 @@ with tab2:
 
     with c3:
         horizon_minutes = 1440
-        st.metric("Horizonte", f"{horizon_minutes} min")
+        horizon_hours = horizon_minutes / 60
+        horizon_days = horizon_minutes / 1440
+
+        st.metric(
+            "Horizonte",
+            f"{horizon_minutes} min | {horizon_hours:.1f} h | {horizon_days:.1f} día"
+        )
 
     with c4:
         glucose_now = st.number_input(
@@ -535,77 +716,100 @@ with tab2:
             key=f"manual_current_glucose_{patient_key}"
         )
 
+    st.info("Si cambias la fecha de referencia, al guardar se ajustarán automáticamente las fechas de todos los eventos, conservando sus horas.")
+
 # =========================
 # TAB 3: EVENTOS
 # =========================
 with tab3:
     st.subheader("Gestión de eventos")
-    st.markdown("### ➕ Agregar evento de comida + insulina")
+    st.markdown("### ➕ Tabla editable de eventos del día")
+    st.caption(f"Puedes capturar hasta {MAX_EVENTOS} eventos prandiales. No se permiten horas duplicadas.")
 
-    c1, c2, c3 = st.columns(3)
+    entries = st.session_state.manual_entries_by_patient.get(patient_key, [])
+    entries = normalize_entries_to_reference_date(entries, pred_date)
+    st.session_state.manual_entries_by_patient[patient_key] = entries
 
-    with c1:
-        meal_time = st.time_input(
-            "Hora del evento",
-            value=time(8, 0),
-            key=f"meal_time_{patient_key}"
-        )
+    count_key = f"manual_event_count_{patient_key}"
+    if count_key not in st.session_state:
+        st.session_state[count_key] = max(1, len(entries)) if entries else 1
 
-    with c2:
-        cho_amount = st.number_input(
-            "Carbohidratos",
-            min_value=0.0,
-            max_value=1000.0,
-            value=0.0,
-            step=1.0,
-            key=f"meal_cho_amount_{patient_key}"
-        )
+    b_add, b_remove = st.columns(2)
 
-    with c3:
-        cho_unit = st.selectbox(
-            "Unidad CHO",
-            ["g", "mg"],
-            index=0,
-            key=f"meal_cho_unit_{patient_key}"
-        )
+    with b_add:
+        if st.button("➕ Agregar evento", use_container_width=True, key=f"btn_add_row_{patient_key}"):
+            if st.session_state[count_key] < MAX_EVENTOS:
+                st.session_state[count_key] += 1
+                st.rerun()
 
-    c4, c5 = st.columns(2)
+    with b_remove:
+        if st.button("➖ Quitar evento", use_container_width=True, key=f"btn_remove_row_{patient_key}"):
+            if st.session_state[count_key] > 1:
+                st.session_state[count_key] -= 1
 
-    with c4:
-        bolus_amount = st.number_input(
-            "Dosis de insulina (U)",
-            min_value=0.0,
-            max_value=100.0,
-            value=0.0,
-            step=0.1,
-            key=f"meal_bolus_amount_{patient_key}"
-        )
+                current_entries = st.session_state.manual_entries_by_patient.get(patient_key, [])
+                st.session_state.manual_entries_by_patient[patient_key] = current_entries[:st.session_state[count_key]]
 
-    with c5:
-        meal_note = st.text_input(
-            "Nota opcional",
-            placeholder="Ej. desayuno, comida, colación, corrección...",
-            key=f"meal_note_{patient_key}"
-        )
+                st.rerun()
 
-    if st.button("➕ Agregar evento prandial", type="primary", use_container_width=True, key=f"add_event_{patient_key}"):
-        if cho_amount <= 0 and bolus_amount <= 0:
-            st.warning("Introduce al menos carbohidratos o una dosis de insulina.")
+    df_editor_base = build_editable_events_df(
+        entries,
+        pred_date,
+        start_time_value,
+        active_rows=st.session_state[count_key]
+    )
+
+    edited_df = st.data_editor(
+        df_editor_base,
+        use_container_width=True,
+        num_rows="fixed",
+        hide_index=True,
+        key=f"manual_events_editor_{patient_key}",
+        column_config={
+            "hora": st.column_config.SelectboxColumn(
+                "Hora",
+                help="Selecciona la hora del evento",
+                options=TIME_OPTIONS,
+                required=True,
+                width="small",
+            ),
+            "cho_valor": st.column_config.NumberColumn(
+                "Carbohidratos",
+                min_value=0.0,
+                max_value=1000.0,
+                step=1.0,
+                format="%.2f",
+                width="small",
+            ),
+            "cho_unidad": st.column_config.SelectboxColumn(
+                "Unidad CHO",
+                options=["g", "mg"],
+                width="small",
+            ),
+            "bolus_u": st.column_config.NumberColumn(
+                "Dosis de insulina (U)",
+                min_value=0.0,
+                max_value=100.0,
+                step=0.1,
+                format="%.2f",
+                width="small",
+            ),
+            "nota": st.column_config.TextColumn(
+                "Nota opcional",
+                width="medium",
+            ),
+        }
+    )
+
+    if st.button("💾 Aplicar cambios de la tabla", type="primary", use_container_width=True, key=f"apply_table_events_{patient_key}"):
+        cleaned_entries, errors = validate_and_convert_events_df(edited_df, pred_date, start_time_value)
+
+        if errors:
+            for err in errors:
+                st.error(err)
         else:
-            event_dt = datetime.combine(pred_date, meal_time)
-            cho_value_mg = cho_amount * 1000.0 if cho_unit == "g" else cho_amount
-
-            st.session_state.manual_entries_by_patient[patient_key].append({
-                "tipo": "Evento prandial",
-                "fecha": pred_date.strftime("%Y-%m-%d"),
-                "hora": meal_time.strftime("%H:%M"),
-                "datetime": event_dt.strftime("%Y-%m-%d %H:%M:%S"),
-                "cho_valor": float(cho_amount),
-                "cho_unidad": cho_unit,
-                "cho_mg": float(cho_value_mg) if cho_amount > 0 else 0.0,
-                "bolus_u": float(bolus_amount),
-                "nota": meal_note.strip(),
-            })
+            st.session_state.manual_entries_by_patient[patient_key] = cleaned_entries
+            st.session_state[count_key] = max(1, len(cleaned_entries)) if cleaned_entries else 1
 
             sync_manual_data_after_edit(
                 patient_id=patient_key,
@@ -614,16 +818,20 @@ with tab3:
                 pred_date=pred_date,
                 start_time_value=start_time_value,
                 glucose_now=glucose_now,
-                entries=st.session_state.manual_entries_by_patient[patient_key]
+                entries=cleaned_entries
             )
 
-            st.success("Evento agregado y guardado correctamente.")
+            st.success("Eventos actualizados y guardados correctamente.")
             st.rerun()
 
     st.divider()
     st.markdown("### 📋 Eventos capturados")
 
     entries = st.session_state.manual_entries_by_patient[patient_key]
+    entries = normalize_entries_to_reference_date(entries, pred_date)
+    st.session_state.manual_entries_by_patient[patient_key] = entries
+
+    render_confidence_message(len(entries), MAX_EVENTOS)
 
     if not entries:
         st.info("Aún no has agregado eventos.")
@@ -631,60 +839,39 @@ with tab3:
         df_entries = pd.DataFrame(entries).copy()
 
         if "datetime" in df_entries.columns:
-            df_entries["datetime"] = pd.to_datetime(df_entries["datetime"], errors="coerce")
-            df_entries = df_entries.sort_values("datetime").reset_index(drop=True)
-            df_entries["datetime"] = df_entries["datetime"].dt.strftime("%Y-%m-%d %H:%M")
+            df_entries["datetime_dt"] = pd.to_datetime(df_entries["datetime"], errors="coerce")
+            df_entries = df_entries.sort_values("datetime_dt").reset_index(drop=True)
+
+            start_dt = datetime.combine(pred_date, start_time_value)
+            df_entries["entra_horizonte"] = df_entries["datetime_dt"] >= start_dt
+            df_entries["datetime"] = df_entries["datetime_dt"].dt.strftime("%Y-%m-%d %H:%M")
 
         df_show = df_entries.copy()
-        show_cols = [c for c in ["hora", "cho_valor", "cho_unidad", "bolus_u", "nota", "datetime"] if c in df_show.columns]
+        show_cols = [c for c in ["hora", "cho_valor", "cho_unidad", "bolus_u", "nota", "datetime", "entra_horizonte"] if c in df_show.columns]
         st.dataframe(df_show[show_cols], use_container_width=True)
 
-        e1, e2 = st.columns(2)
+        if df_entries["hora"].duplicated().any():
+            st.error("Se detectaron horas duplicadas. Corrige la tabla para evitar eventos solapados.")
 
-        with e1:
-            idx_delete = st.selectbox(
-                "Selecciona evento a eliminar",
-                options=list(range(len(df_entries))),
-                format_func=lambda i: (
-                    f"{i} | {df_entries.loc[i, 'hora']} | "
-                    f"CHO: {df_entries.loc[i, 'cho_valor']} {df_entries.loc[i, 'cho_unidad']} | "
-                    f"Bolus: {df_entries.loc[i, 'bolus_u']} U"
-                ),
-                key=f"delete_manual_event_idx_{patient_key}"
+        if any(pd.to_datetime(df_entries["datetime_dt"], errors="coerce") < pd.Timestamp(datetime.combine(pred_date, start_time_value))):
+            st.warning("Hay eventos antes de la hora inicial del pronóstico; esos eventos podrían no entrar al horizonte simulado.")
+
+        if st.button("🧹 Limpiar todos los eventos", use_container_width=True, key=f"delete_all_{patient_key}"):
+            st.session_state.manual_entries_by_patient[patient_key] = []
+            st.session_state[count_key] = 1
+
+            sync_manual_data_after_edit(
+                patient_id=patient_key,
+                patient_name=patient_name,
+                patient_folder=patient_folder,
+                pred_date=pred_date,
+                start_time_value=start_time_value,
+                glucose_now=glucose_now,
+                entries=[]
             )
 
-            if st.button("🗑️ Eliminar evento seleccionado", use_container_width=True, key=f"delete_one_{patient_key}"):
-                st.session_state.manual_entries_by_patient[patient_key].pop(idx_delete)
-
-                sync_manual_data_after_edit(
-                    patient_id=patient_key,
-                    patient_name=patient_name,
-                    patient_folder=patient_folder,
-                    pred_date=pred_date,
-                    start_time_value=start_time_value,
-                    glucose_now=glucose_now,
-                    entries=st.session_state.manual_entries_by_patient[patient_key]
-                )
-
-                st.success("Evento eliminado y cambios guardados.")
-                st.rerun()
-
-        with e2:
-            if st.button("🧹 Limpiar todos los eventos", use_container_width=True, key=f"delete_all_{patient_key}"):
-                st.session_state.manual_entries_by_patient[patient_key] = []
-
-                sync_manual_data_after_edit(
-                    patient_id=patient_key,
-                    patient_name=patient_name,
-                    patient_folder=patient_folder,
-                    pred_date=pred_date,
-                    start_time_value=start_time_value,
-                    glucose_now=glucose_now,
-                    entries=[]
-                )
-
-                st.success("Todos los eventos fueron eliminados y cambios guardados.")
-                st.rerun()
+            st.success("Todos los eventos fueron eliminados y cambios guardados.")
+            st.rerun()
 
     st.divider()
     st.markdown("### 📊 Resumen")
@@ -710,6 +897,8 @@ with tab4:
     st.subheader("Guardar y continuar")
 
     entries = st.session_state.manual_entries_by_patient[patient_key]
+    entries = normalize_entries_to_reference_date(entries, pred_date)
+    st.session_state.manual_entries_by_patient[patient_key] = entries
 
     if not entries:
         st.info("No hay eventos para guardar todavía.")
@@ -745,16 +934,16 @@ with tab4:
 
     left, center, right = st.columns([2, 3, 2])
 
-    with center:
-        if st.button("📈 Guardar e ir a Pronóstico", use_container_width=True, type="primary"):
-            _, _, config_payload = save_all_manual_data(
-                patient_id=patient_key,
-                patient_name=patient_name,
-                patient_folder=patient_folder,
-                pred_date=pred_date,
-                start_time_value=start_time_value,
-                glucose_now=glucose_now,
-                entries=entries
-            )
-            st.session_state.manual_prediction_config = config_payload
-            st.switch_page("pages/4_Pronóstico.py")
+    # with center:
+    #     if st.button("📈 Guardar e ir a Pronóstico", use_container_width=True, type="primary"):
+    #         _, _, config_payload = save_all_manual_data(
+    #             patient_id=patient_key,
+    #             patient_name=patient_name,
+    #             patient_folder=patient_folder,
+    #             pred_date=pred_date,
+    #             start_time_value=start_time_value,
+    #             glucose_now=glucose_now,
+    #             entries=entries
+    #         )
+    #         st.session_state.manual_prediction_config = config_payload
+    #         st.switch_page("pages/4_Pronóstico.py")

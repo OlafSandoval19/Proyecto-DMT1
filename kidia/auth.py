@@ -1,13 +1,13 @@
 import streamlit as st
 
 USERS = {
-    "admin": {
-        "password": "admin123",
-        "role": "admin"
+    "Olaf": {
+        "password": "1999",
+        "role": ""
     },
-    "doctor": {
-        "password": "doc123",
-        "role": "clinician"
+    "ITCG": {
+        "password": "tecguzman123",
+        "role": ""
     }
 }
 
